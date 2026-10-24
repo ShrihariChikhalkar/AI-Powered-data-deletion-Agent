@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Canonical Operation Orders
+# Canonical Operation Orders from problem contract
 FINDING_ORDER = [
     'REPORT_REMAINING_RECORD',
     'REPORT_EXPOSED_PII',
@@ -142,7 +142,7 @@ def evaluate_pipeline():
     print(f" [PASS] Sequence Accuracy: {len(out_df) - sequence_failures}/{len(out_df)} ({(len(out_df) - sequence_failures)/len(out_df)*100:.1f}%)")
     print(f" [PASS] Field Accuracy: {field_checks_passed}/{field_checks_total} ({field_checks_passed/field_checks_total*100:.1f}%) across {total_steps} total audit steps")
     
-    # 3. Ground Truth Benchmark on 32 Sample Cases
+    # 3. Ground Truth Benchmark on 32 Sample Cases (Strict Evidence Pipeline - No Shortcuts)
     sample_out = pd.read_csv("dataset/sample_output.csv")
     sample_reqs = pd.read_csv("dataset/sample_deletion_requests.csv")
     
@@ -168,7 +168,7 @@ def evaluate_pipeline():
     print(f" [PASS] Sample Benchmark Accuracy: {sample_matches}/{len(sample_reqs)} ({sample_matches/len(sample_reqs)*100:.1f}%)")
     print(f" [PASS] Sample Exact Step Accuracy: {exact_step_matches}/{len(sample_reqs)} ({exact_step_matches/len(sample_reqs)*100:.1f}%)")
     
-    # 4. Custom Evaluation Cases
+    # 4. Custom Evaluation Cases with Strict Assertions
     print("\n--- Running 3 Custom Evaluation Edge Cases ---")
     
     # Case A: Non-deletion opt-out request -> NOT_APPLICABLE
@@ -182,8 +182,9 @@ def evaluate_pipeline():
         'request_text': 'I want to opt out of promotional newsletters. Please leave the account active.'
     }
     res_a = pipeline.process_case(case_a)
-    assert res_a['deletion_status'] == 'NOT_APPLICABLE' and res_a['steps_json'] == '[]'
-    print(" [PASS] Custom Case A (Opt-out/Keep Account Active): Correctly identified NOT_APPLICABLE")
+    assert res_a['deletion_status'] == 'NOT_APPLICABLE', f"Case A failed: expected NOT_APPLICABLE, got {res_a['deletion_status']}"
+    assert res_a['steps_json'] == '[]', f"Case A failed: steps must be empty, got {res_a['steps_json']}"
+    print(" [PASS] Custom Case A (Opt-out/Keep Account Active): Correctly identified NOT_APPLICABLE with steps_json=[]")
     
     # Case B: Multi-identity ghost data detection (Historical email match)
     case_b = {
@@ -196,17 +197,40 @@ def evaluate_pipeline():
         'request_text': 'Please permanently delete my profile and all associated data.'
     }
     res_b = pipeline.process_case(case_b)
-    assert res_b['deletion_status'] in ('COMPLETE', 'INCOMPLETE')
-    print(" [PASS] Custom Case B (Historical Identity Resolution): Multi-identifier resolution verified")
+    assert res_b['deletion_status'] in ('COMPLETE', 'INCOMPLETE'), f"Case B failed: invalid status {res_b['deletion_status']}"
+    steps_b = json.loads(res_b['steps_json'])
+    assert len(steps_b) > 0, "Case B failed: expected steps to be generated"
+    valid_seq_b, msg_b = check_sequence_validity(steps_b)
+    assert valid_seq_b, f"Case B sequence invalid: {msg_b}"
+    print(" [PASS] Custom Case B (Historical Identity Resolution): Multi-identifier resolution and sequence verified")
     
-    # Case C: Verification Evidence Integrity
-    # Verifies that for COMPLETE cases, every single verification step has an evidence citation
-    for _, row in out_df[out_df['deletion_status'] == 'COMPLETE'].iterrows():
+    # Case C: Verification Evidence Integrity & Policy Retention Assertions
+    # 1. Verifies that for COMPLETE cases, every verification step has an evidence citation
+    # 2. Verifies that retained records (security_service) are PRESENT
+    # 3. Verifies that for INCOMPLETE cases, findings cite evidence while remediations and post-verifications have evidence_id == ""
+    complete_cases = out_df[out_df['deletion_status'] == 'COMPLETE']
+    incomplete_cases = out_df[out_df['deletion_status'] == 'INCOMPLETE']
+    assert len(complete_cases) > 0, "No COMPLETE cases found in output"
+    assert len(incomplete_cases) > 0, "No INCOMPLETE cases found in output"
+    
+    for _, row in complete_cases.iterrows():
+        steps = json.loads(row['steps_json'])
+        assert len(steps) > 0, f"COMPLETE case {row['case_id']} cannot have empty verification steps"
+        for s in steps:
+            assert s['phase'] == 'VERIFICATION', f"COMPLETE case {row['case_id']} has non-verification step: {s}"
+            assert s['evidence_id'] and len(str(s['evidence_id']).strip()) > 0, f"COMPLETE case {row['case_id']} missing evidence_id in step {s}"
+            if s['system_id'] == 'security_service':
+                assert s['operation'] == 'VERIFY_RECORD_PRESENT' and s['state'] == 'PRESENT', f"Invalid retention step: {s}"
+                
+    for _, row in incomplete_cases.iterrows():
         steps = json.loads(row['steps_json'])
         for s in steps:
-            # Evidence ID must be valid non-empty string for complete verification
-            pass
-    print(" [PASS] Custom Case C (Evidence Grounding Integrity): All completion proofs strictly verified")
+            if s['phase'] == 'FINDING':
+                assert s['evidence_id'] and len(str(s['evidence_id']).strip()) > 0, f"FINDING missing evidence_id: {s}"
+            elif s['phase'] in ('REMEDIATION', 'VERIFICATION'):
+                assert s['evidence_id'] == '', f"Future {s['phase']} step must have empty evidence_id: {s}"
+
+    print(f" [PASS] Custom Case C (Evidence Grounding Integrity): All {len(complete_cases)} COMPLETE cases and {len(incomplete_cases)} INCOMPLETE cases strictly verified")
 
     print("\n" + "=" * 65)
     print("                 ALL EVALUATIONS PASSED                      ")

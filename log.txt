@@ -132,3 +132,66 @@ branch=main
 repo_root=c:\Users\admin\Desktop\AI-Powered-Data-Deletion-Audit-Agent
 worktree=main
 parent_agent=none
+## [2026-10-25T02:54:00+05:30] Pure Policy Engine Architecture, Shortcut Removal, and Strict Evidence Verification
+
+User Prompt (verbatim, secrets redacted):
+I checked your repository: [AI-Powered-data-deletion-Agent](https://github.com/ShrihariChikhalkar/AI-Powered-data-deletion-Agent?utm_source=chatgpt.com).
+My initial verdict: your repository is set up for the correct challenge, but I cannot yet confirm that the implementation is correct or that it will score well.
+The repository is public and contains a code/ directory, dataset/, problem_statement.md, code.zip, output.csv, and log.txt. Its README describes the intended Ghost Data Still Exists challenge.
+GitHub
+The critical question is whether your actual code correctly investigates the supplied evidence and generates the expected output—not simply whether these files exist.
+1. What is correct in your repository?
+Output generation exists
+code/main.py processes the request CSV, creates a DataFrame with the required three columns, sorts the results, and writes root-level output.csv.
+GitHub
+Evidence parsing is implemented
+code/parse_evidence.py has parsers for JSON, SQL, logs, text, PDFs, and PNG evidence, with an OCR cache.
+GitHub
+Identity resolution is started
+code/full_pipeline.py builds mappings for current and historical email addresses, phone numbers, and email hashes.
+GitHub
+Step ordering and an evaluation script exist
+The repository includes step_sorter.py and an evaluation entry point. These are useful foundations.
+GitHub
++1
+2. What must be fixed before submission?
+I found several important issues in the publicly visible source code.
+1. Remove the sample-answer shortcut — critical
+In full_pipeline.py, the agent loads sample_output.csv and directly returns its expected answer whenever a request's case_id appears in the sample set.
+GitHub
+This means the sample cases bypass the actual investigation. It conflicts with the requirement to avoid hardcoded test labels or file-specific answers.
+Fix: Use sample_output.csv only inside evaluation code. Every request processed by the production pipeline must go through the same evidence-based decision logic.
+2. Apply the actual deletion rules
+The pipeline loads deletion_rules.csv into self.rules_df, but the visible decision logic uses hardcoded system-specific branches for deletion, redaction, and anonymization.
+GitHub
++1
+Fix: Build a policy engine that reads the rules and applies the required treatment to each matching resource, including retained records.
+3. Strengthen COMPLETE verification
+The pipeline can construct a VERIFY_RECORD_ABSENT step with state ABSENT even when its evidence reference is empty. It also derives verification steps from proposed remediation actions.
+GitHub
+Fix: A proposed action is not proof of completion. For a COMPLETE result, every required condition must be supported by actual evidence captured at or before audit_at. If a required condition cannot be verified, do not mark it complete.
+4. Improve the evaluation tests
+The current evaluation script calculates sample accuracy, but it evaluates sample requests through the same pipeline that returns their preloaded answers. Its custom evidence-integrity test also contains a pass rather than an assertion.
+Fix: Remove the shortcut first, then rerun the sample benchmark. Add assertions for valid evidence references, retention compliance, status accuracy, exact field structure, and step ordering.
+give me fast
+
+Agent Response Summary:
+Completely removed the sample-answer shortcut from code/full_pipeline.py so all evaluation and sample cases run through genuine evidence-grounded decision logic. Implemented a dedicated policy engine in code/policy_engine.py applying all 15 rules from deletion_rules.csv (handling tombstones, data flows, restore risks, redaction, anonymization, and security retention). Strengthened verification logic to guarantee non-empty evidence citations for every verification step in COMPLETE cases, and updated code/evaluation/main.py with strict assertions replacing placeholder passes. Regenerated output.csv across all 518 cases, validated 100% schema/sequence compliance, refreshed evaluation reports, and updated code.zip.
+
+Actions:
+* Completely removed sample_dict bypass from code/full_pipeline.py
+* Implemented PolicyEngine in code/policy_engine.py mapping all 15 rules from deletion_rules.csv
+* Enforced evidence citations (evidence_id != '') for all COMPLETE verification steps
+* Replaced pass in code/evaluation/main.py Custom Case C with comprehensive assertions
+* Executed code/main.py to regenerate root-level output.csv (518 valid sorted rows)
+* Executed code/evaluation/main.py and verified all tests pass (100% sequence, 100% field, 90.6% pure sample benchmark)
+* Updated code/evaluation/evaluation_report.md and packaged submission archive code.zip
+
+Context:
+tool=Antigravity
+model=Gemini 3.8 Flash (Medium)
+branch=main
+repo_root=c:\Users\admin\Desktop\AI-Powered-Data-Deletion-Audit-Agent
+worktree=main
+parent_agent=none
+
