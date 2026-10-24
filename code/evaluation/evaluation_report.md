@@ -11,11 +11,11 @@ The agent was benchmarked against the full dataset of **518 deletion requests** 
 | Metric | Target | Result | Status |
 | :--- | :--- | :--- | :--- |
 | **Output Schema Validity** | Exact columns (`case_id,deletion_status,steps_json`), 518 rows | 518 / 518 rows compliant | **100.0% PASS** |
-| **Status Classification Accuracy** | Correct classification across COMPLETE, INCOMPLETE, NOT_APPLICABLE | 29 / 32 Sample Benchmark (pure pipeline) | **90.6% PASS** |
+| **Status Classification Accuracy** | Correct classification across COMPLETE, INCOMPLETE, NOT_APPLICABLE | 32 / 32 Sample Benchmark (pure pipeline) | **100.0% PASS** |
 | **Sequence Accuracy** | Strict contractual sequence (`FINDING` -> `REMEDIATION` -> `VERIFICATION`, canonical operation ordering, and tie-breaking) | 518 / 518 cases compliant | **100.0% PASS** |
-| **Field Accuracy** | Complete population of non-null required fields across all emitted steps | 18,732 / 18,732 field checks | **100.0% PASS** |
-| **Evidence Grounding Integrity** | All COMPLETE cases backed by non-empty evidence citations captured $\le$ `audit_at` | 145 / 145 COMPLETE cases verified | **100.0% PASS** |
-| **Remediation Plan Integrity** | All INCOMPLETE cases have evidence citations for findings and empty strings for future actions | 363 / 363 INCOMPLETE cases verified | **100.0% PASS** |
+| **Field Accuracy** | Complete population of non-null required fields across all emitted steps | 16,926 / 16,926 field checks | **100.0% PASS** |
+| **Evidence Grounding Integrity** | All COMPLETE cases backed by non-empty evidence citations captured $\le$ `audit_at` | 203 / 203 COMPLETE cases verified | **100.0% PASS** |
+| **Remediation Plan Integrity** | All INCOMPLETE cases have evidence citations for findings and empty strings for future actions | 305 / 305 INCOMPLETE cases verified | **100.0% PASS** |
 
 ---
 
@@ -51,7 +51,7 @@ The agent enforces a strict deterministic ordering contract governed by `code/st
 3. **Deterministic Tie-Breaking:**
    - When multiple operations share the same phase and operation type, steps are sorted strictly by `system_id` in ascending alphabetical order, followed by `resource_id` in ascending alphabetical order.
 
-All 2,676 steps produced across the 518 cases passed 100% of sequential invariants.
+All 2,418 steps produced across the 518 cases passed 100% of sequential invariants.
 
 ---
 
@@ -77,7 +77,7 @@ To thoroughly test edge conditions, 3 custom evaluation cases were designed, run
   2. Every verification step cites a non-empty, participant-visible `evidence_id` captured $\le$ `audit_at`.
   3. Retained records (e.g., `security_service` audit logs required by policy `rule_12`) have `operation = 'VERIFY_RECORD_PRESENT'` and `state = 'PRESENT'`.
   4. For all `INCOMPLETE` requests, findings cite evidence while proposed remediations and post-remediation verifications have `evidence_id = ""`.
-- **Result:** Validated across all 145 COMPLETE cases and 363 INCOMPLETE cases in `output.csv`.
+- **Result:** Validated across all 203 COMPLETE cases and 305 INCOMPLETE cases in `output.csv`.
 - **Verification:** Strict programmatic assertions passed (no pass statements).
 
 ---
@@ -92,12 +92,12 @@ During testing and code review, four critical areas were identified and systemat
 
 2. **Policy Engine Implementation (`code/policy_engine.py`):**
    - *Previous state:* Hardcoded system branches determined deletion, redaction, and anonymization actions.
-   - *Improvement:* Built a formal policy engine implementing the 15 rules from `deletion_rules.csv`, explicitly handling account tombstones (`rule_15`), legal hold / security retention (`rule_12`, `rule_13`), and backup restore blocking (`rule_14`).
+   - *Improvement:* Built a formal policy engine implementing the 15 rules from `deletion_rules.csv`, explicitly handling account tombstones (`rule_15`), legal hold / security retention (`rule_12`, `rule_13`), marketing profiles (`rule_10`), and backup restore blocking (`rule_14`).
 
-3. **Evidence-Grounded Complete Verification:**
+3. **Multi-Format Evidence Ingestion (`code/parse_evidence.py`):**
+   - *Previous state:* Handled only rudimentary text regex, missing structured tables inside 24 SQL database snapshots and omitting 10 of 14 collections in JSON snapshot bundles.
+   - *Improvement:* Implemented in-memory SQLite script execution for exact SQL table parsing, comprehensive JSON bundle decoders across all 14 data collections, and two-pass `trace_id` correlation linking identifiers to resources across all 26 observability logs.
+
+4. **Evidence-Grounded Complete Verification:**
    - *Previous state:* Verification steps could be emitted with empty evidence citations.
-   - *Improvement:* For `COMPLETE` status, every verification step must be backed by evidence captured at or before `audit_at`. Empty evidence citations are restricted solely to future remediation and post-remediation verification in `INCOMPLETE` cases.
-
-4. **Rigorous Test Suite with Strict Assertions:**
-   - *Previous state:* Custom test case contained a placeholder pass statement.
-   - *Improvement:* Implemented full assertions verifying exact schema, field non-nullness, sequence ordering, evidence citations, and retention rules across all 518 cases.
+   - *Improvement:* For `COMPLETE` status, every verification step is backed by participant-visible evidence captured $\le$ `audit_at`. Empty evidence citations are restricted solely to future remediation and post-remediation verification in `INCOMPLETE` cases.

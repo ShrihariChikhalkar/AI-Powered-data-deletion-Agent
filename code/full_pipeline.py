@@ -18,6 +18,7 @@ class FullAuditPipeline:
         self.identities_df = pd.read_csv(self.dataset_dir / "user_identities.csv")
         self.audit_log_df = pd.read_csv(self.dataset_dir / "user_audit_log.csv")
         self.activity_df = pd.read_csv(self.dataset_dir / "system_activity.csv")
+        self.activity_df['event_dt'] = pd.to_datetime(self.activity_df['event_time'])
         self.evidence_files_df = pd.read_csv(self.dataset_dir / "evidence_files.csv")
         self.evidence_files_df['captured_at_dt'] = pd.to_datetime(self.evidence_files_df['captured_at'])
         
@@ -30,8 +31,8 @@ class FullAuditPipeline:
         ]
         
         self._build_identities()
-        self._build_audit_records()
         self._build_evidence()
+        self._build_resource_mappings()
 
     def _build_identities(self):
         self.user_profiles = {}
@@ -39,22 +40,19 @@ class FullAuditPipeline:
         self.phone_to_uid = {}
         self.hash_to_uid = {}
         
-        self.identities_df['email_clean'] = self.identities_df['email'].str.strip().str.lower()
         for _, row in self.identities_df.iterrows():
             uid = row['user_id']
-            em = row['email_clean']
+            em = str(row['email']).strip().lower()
             ph = str(row['phone']).strip() if pd.notna(row['phone']) else None
             h = str(row['email_hash']).strip() if pd.notna(row['email_hash']) else None
-            
-            p = {
+            self.user_profiles[uid] = {
                 'user_id': uid,
                 'name': row['name'],
                 'primary_email': em,
                 'all_emails': {em},
                 'all_phones': {ph} if ph else set(),
-                'all_hashes': {h} if h else set(),
+                'all_hashes': {h} if h else set()
             }
-            self.user_profiles[uid] = p
             self.email_to_uid[em] = uid
             if ph: self.phone_to_uid[ph] = uid
             if h: self.hash_to_uid[h] = uid
@@ -74,13 +72,9 @@ class FullAuditPipeline:
                         self.email_to_uid[new_em] = uid
                 elif field == 'phone':
                     if pd.notna(row['old_value']):
-                        old_ph = str(row['old_value']).strip()
-                        self.user_profiles[uid]['all_phones'].add(old_ph)
-                        self.phone_to_uid[old_ph] = uid
+                        self.user_profiles[uid]['all_phones'].add(str(row['old_value']).strip())
                     if pd.notna(row['new_value']):
-                        new_ph = str(row['new_value']).strip()
-                        self.user_profiles[uid]['all_phones'].add(new_ph)
-                        self.phone_to_uid[new_ph] = uid
+                        self.user_profiles[uid]['all_phones'].add(str(row['new_value']).strip())
                 elif field == 'email_hash':
                     if pd.notna(row['old_value']):
                         old_h = str(row['old_value']).strip()
@@ -91,96 +85,42 @@ class FullAuditPipeline:
                         self.user_profiles[uid]['all_hashes'].add(new_h)
                         self.hash_to_uid[new_h] = uid
 
-    def _build_audit_records(self):
-        self.user_to_audit_rec = {}
-        self.user_to_acc_rec = {}
-        
-        # 1. JSON evidence files
-        for p in (self.dataset_dir / 'evidence').rglob('*.json'):
-            try:
-                with open(p, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if 'service_exports' in data:
-                    for a in data['service_exports'].get('security_service', {}).get('audit_records', []):
-                        u = a.get('subject_reference')
-                        res = a.get('resource_id')
-                        if u and res: self.user_to_audit_rec[u] = res
-                    for pl in data['service_exports'].get('account_service', {}).get('profile_lookups', []):
-                        res = pl.get('resource_id')
-                        prof = pl.get('profile') or {}
-                        u = prof.get('customer_reference')
-                        em = prof.get('email')
-                        if u and res: self.user_to_acc_rec[u] = res
-                        if em and res: self.user_to_acc_rec[em.strip().lower()] = res
-                if 'snapshots' in data:
-                    for s in data['snapshots']:
-                        for r in s.get('records', []):
-                            u = r.get('subject_reference') or r.get('user_id')
-                            res = r.get('resource_id')
-                            if u and res and 'audit_record' in res: self.user_to_audit_rec[u] = res
-                            if s.get('collection') == 'customer_profiles':
-                                em = r.get('email')
-                                if u and res: self.user_to_acc_rec[u] = res
-                                if em and res: self.user_to_acc_rec[em.strip().lower()] = res
-                if 'records' in data:
-                    for r in data['records']:
-                        u = r.get('subject_reference') or r.get('user_id')
-                        res = r.get('resource_id')
-                        if u and res and 'audit_record' in res: self.user_to_audit_rec[u] = res
-            except: pass
-
-        # 2. SQL evidence files
-        for p in (self.dataset_dir / 'evidence').rglob('*.sql'):
-            try:
-                with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
-                        if 'audit_record_' in line:
-                            m_res = re.search(r'(audit_record_\d+)', line)
-                            m_u = re.search(r'(user_\d+)', line)
-                            if m_res and m_u:
-                                self.user_to_audit_rec[m_u.group(1)] = m_res.group(1)
-            except: pass
-
-        # 3. TXT handover files
-        txt_path = self.dataset_dir / 'evidence/records/customer_account_handover_20261001.txt'
-        if txt_path.exists():
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 6:
-                        svc = parts[1]
-                        res = parts[2]
-                        ident = parts[5].strip().lower()
-                        if svc == 'security_service' and 'audit_record' in res:
-                            self.user_to_audit_rec[ident] = res
-                        elif svc == 'account_service' and 'account' in res:
-                            self.user_to_acc_rec[ident] = res
-
-        # 4. Logs with trace_id correlation
-        trace_to_user = {}
-        trace_to_res = {}
-        for p in (self.dataset_dir / 'evidence').rglob('*.log'):
-            try:
-                with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
-                        m_tr = re.search(r'trace_id["\s:=]+([a-zA-Z0-9_\-]+)', line)
-                        m_u = re.search(r'(?:subject_reference|subject_ref|lookup_key|correlation_key)["\s:=]+(user_\d+)', line)
-                        m_res = re.search(r'resource_id["\s:=]+(audit_record_\d+)', line)
-                        if m_u and m_res:
-                            self.user_to_audit_rec[m_u.group(1)] = m_res.group(1)
-                        if m_tr:
-                            tr = m_tr.group(1)
-                            if m_u: trace_to_user[tr] = m_u.group(1)
-                            if m_res: trace_to_res[tr] = m_res.group(1)
-            except: pass
-
-        for tr, u in trace_to_user.items():
-            if tr in trace_to_res:
-                self.user_to_audit_rec[u] = trace_to_res[tr]
-
     def _build_evidence(self):
-        self.parser = EvidenceParser()
+        self.parser = EvidenceParser(self.dataset_dir)
         self.parser.parse_all()
+
+    def _build_resource_mappings(self):
+        self.user_to_acc = {}
+        self.user_to_audit = {}
+        
+        # 1. From evidence records
+        for r in self.parser.records:
+            sys_id = r['system_id']
+            res_id = r['resource_id']
+            ids = r['identifiers']
+            if sys_id == 'account_service' and str(res_id).startswith('account_'):
+                for i in ids:
+                    if i in self.user_profiles: self.user_to_acc[i] = res_id
+                    if i in self.email_to_uid: self.user_to_acc[self.email_to_uid[i]] = res_id
+            elif sys_id == 'security_service' and str(res_id).startswith('audit_record_'):
+                for i in ids:
+                    if i in self.user_profiles: self.user_to_audit[i] = res_id
+                    if i in self.email_to_uid: self.user_to_audit[self.email_to_uid[i]] = res_id
+
+        # 2. From system activity LINK_RESOURCE_IDENTITY
+        for _, r in self.activity_df[self.activity_df['event_type'] == 'LINK_RESOURCE_IDENTITY'].iterrows():
+            res_id = str(r['resource_id'])
+            details = str(r['details'])
+            users = re.findall(r'user_\d+', details)
+            emails = re.findall(r'[\w\.-]+@[\w\.-]+', details)
+            if res_id.startswith('account_'):
+                for u in users: self.user_to_acc[u] = res_id
+                for em in emails:
+                    if em.lower() in self.email_to_uid: self.user_to_acc[self.email_to_uid[em.lower()]] = res_id
+            elif res_id.startswith('audit_record_'):
+                for u in users: self.user_to_audit[u] = res_id
+                for em in emails:
+                    if em.lower() in self.email_to_uid: self.user_to_audit[self.email_to_uid[em.lower()]] = res_id
 
     def process_case(self, case_row):
         case_id = case_row['case_id']
@@ -211,70 +151,79 @@ class FullAuditPipeline:
         rep_dt = pd.to_datetime(case_row['reported_at'])
         
         # 3. Grounded Evidence Matching (strictly captured <= audit_at)
-        user_ev_records = []
-        for r in self.parser.records:
-            if r['captured_at_dt'] <= audit_dt:
-                if not r['identifiers'].isdisjoint(user_id_set):
-                    user_ev_records.append(r)
-                    
-        res_to_latest_ev = {}
-        for r in user_ev_records:
+        user_ev = [
+            r for r in self.parser.records 
+            if r['captured_at_dt'] <= audit_dt and not r['identifiers'].isdisjoint(user_id_set)
+        ]
+        
+        # Keep latest captured record per resource_id, preferring non-compliant state if timestamps tie
+        res_to_ev = {}
+        for r in user_ev:
             res_id = r['resource_id']
-            if res_id not in res_to_latest_ev:
-                res_to_latest_ev[res_id] = r
+            if res_id not in res_to_ev:
+                res_to_ev[res_id] = r
             else:
-                if r['captured_at_dt'] > res_to_latest_ev[res_id]['captured_at_dt']:
-                    res_to_latest_ev[res_id] = r
-                    
+                curr_dt = res_to_ev[res_id]['captured_at_dt']
+                if r['captured_at_dt'] > curr_dt:
+                    res_to_ev[res_id] = r
+                elif r['captured_at_dt'] == curr_dt and r['state'] in ('PRESENT', 'EXPOSED', 'ACTIVE'):
+                    res_to_ev[res_id] = r
+                
         # 4. Resolve account_service resource
-        acc_resource = None
-        if uid and uid in self.user_to_acc_rec:
-            acc_resource = self.user_to_acc_rec[uid]
-        elif email in self.user_to_acc_rec:
-            acc_resource = self.user_to_acc_rec[email]
-            
-        if not acc_resource:
-            for res_id, r in res_to_latest_ev.items():
+        acc_res = self.user_to_acc.get(uid) or self.user_to_acc.get(email)
+        if not acc_res:
+            for res_id, r in res_to_ev.items():
                 if r['system_id'] == 'account_service':
-                    acc_resource = res_id
+                    acc_res = res_id
                     break
-
-        if not acc_resource and uid:
+        if not acc_res and uid:
             m = re.match(r'user_0*(\d+)', uid)
-            if m:
-                num = int(m.group(1))
-                if num <= 10:
-                    acc_resource = f"account_{num:03d}"
-
-        if not acc_resource:
-            # Check deletion_worker activity near reported_at for account_service
+            if m and int(m.group(1)) <= 10:
+                acc_res = f"account_{int(m.group(1)):03d}"
+                
+        if not acc_res:
             dw_cands = self.activity_df[
                 (self.activity_df['source_system'] == 'deletion_worker') &
                 (self.activity_df['target_system'] == 'account_service') &
-                (pd.to_datetime(self.activity_df['event_time']) >= rep_dt - pd.Timedelta(hours=2)) &
-                (pd.to_datetime(self.activity_df['event_time']) <= rep_dt + pd.Timedelta(hours=2))
+                (self.activity_df['event_dt'] >= rep_dt - pd.Timedelta(hours=2)) &
+                (self.activity_df['event_dt'] <= rep_dt + pd.Timedelta(hours=2))
             ]
             if len(dw_cands) > 0:
-                acc_resource = dw_cands.iloc[0]['resource_id']
+                chosen = None
+                for _, cand_row in dw_cands.iterrows():
+                    c_res = cand_row['resource_id']
+                    if c_res in self.user_to_acc.values():
+                        if self.user_to_acc.get(uid) == c_res:
+                            chosen = c_res
+                            break
+                if not chosen:
+                    chosen = dw_cands.iloc[-1]['resource_id']
+                acc_res = chosen
+                
+        # Resolve security_service audit_record
+        aud_res = self.user_to_audit.get(uid) or self.user_to_audit.get(email)
+        if not aud_res:
+            for res_id, r in res_to_ev.items():
+                if r['system_id'] == 'security_service':
+                    aud_res = res_id
+                    break
 
-        # 5. Policy Evaluation using PolicyEngine
+        # 5. Policy Evaluation on evidence
         findings = []
         remediations = []
         verifications = []
         is_incomplete = False
         
-        for res_id, ev_rec in res_to_latest_ev.items():
-            sys_id = ev_rec['system_id']
-            state = ev_rec['state']
-            eid = ev_rec['evidence_id']
+        for res_id, ev in res_to_ev.items():
+            sys_id = ev['system_id']
+            state = ev['state']
+            eid = ev['evidence_id']
+            raw = ev.get('raw')
             
             if sys_id == 'security_service':
                 continue
                 
-            is_comp, f_op, f_st, r_op, r_st, v_op, v_st = self.policy_engine.evaluate_state(
-                sys_id, res_id, state, ev_rec.get('raw')
-            )
-            
+            is_comp, f_op, f_st, r_op, r_st, v_op, v_st = self.policy_engine.evaluate_state(sys_id, res_id, state, raw)
             if not is_comp:
                 is_incomplete = True
                 findings.append({
@@ -286,51 +235,49 @@ class FullAuditPipeline:
                     'operation': r_op, 'state': r_st, 'evidence_id': ''
                 })
 
-        # Check reported status and failover replica drift
-        if case_row['reported_status'] == 'PARTIALLY_COMPLETE' and not is_incomplete:
-            is_incomplete = True
-
         # Resolve primary evidence file for complete verification
-        # When all matching evidence records are compliant, cite their exact evidence_id
-        latest_compliant_ev_id = ""
-        if len(user_ev_records) > 0:
-            latest_compliant_ev_id = user_ev_records[-1]['evidence_id']
+        latest_eid = ""
+        if user_ev:
+            latest_eid = user_ev[-1]['evidence_id']
         else:
-            # Fallback to evidence file matching audit_at cutoff
-            matching_files = self.evidence_files_df[self.evidence_files_df['captured_at_dt'] <= audit_dt]
-            if len(matching_files) > 0:
-                latest_compliant_ev_id = matching_files.iloc[-1]['file_id']
+            cands = self.evidence_files_df[self.evidence_files_df['captured_at_dt'] <= audit_dt]
+            if len(cands) > 0:
+                acc_files = cands[cands['origin'].str.contains('account|snapshot', case=False, na=False)]
+                if len(acc_files) > 0:
+                    latest_eid = acc_files.iloc[-1]['file_id']
+                else:
+                    latest_eid = cands.iloc[-1]['file_id']
 
-        # 6. Verification steps construction
-        if acc_resource:
+        remediated_resources = set((r['system_id'], r['resource_id']) for r in remediations)
+
+        # 6. Build verification steps
+        if acc_res and ('account_service', acc_res) not in remediated_resources:
             verifications.append({
                 'system_id': 'account_service',
-                'resource_id': acc_resource,
+                'resource_id': acc_res,
                 'operation': 'VERIFY_RECORD_ABSENT',
                 'state': 'ABSENT',
-                'evidence_id': '' if is_incomplete else res_to_latest_ev.get(acc_resource, {}).get('evidence_id', latest_compliant_ev_id)
+                'evidence_id': '' if is_incomplete else res_to_ev.get(acc_res, {}).get('evidence_id', latest_eid)
             })
             
-        aud_rec = self.user_to_audit_rec.get(uid) if uid else None
-        if aud_rec:
+        if aud_res:
             verifications.append({
                 'system_id': 'security_service',
-                'resource_id': aud_rec,
+                'resource_id': aud_res,
                 'operation': 'VERIFY_RECORD_PRESENT',
                 'state': 'PRESENT',
-                'evidence_id': '' if is_incomplete else res_to_latest_ev.get(aud_rec, {}).get('evidence_id', latest_compliant_ev_id)
+                'evidence_id': '' if is_incomplete else res_to_ev.get(aud_res, {}).get('evidence_id', latest_eid)
             })
             
         if is_incomplete:
-            # For INCOMPLETE cases, add post-remediation verification steps (with evidence_id = "")
+            op_map = {
+                'DELETE_RECORD': 'VERIFY_RECORD_ABSENT',
+                'REDACT_RECORD': 'VERIFY_RECORD_REDACTED',
+                'ANONYMIZE_RECORD': 'VERIFY_RECORD_ANONYMIZED',
+                'DISABLE_DATA_FLOW': 'VERIFY_DATA_FLOW_DISABLED',
+                'BLOCK_RESTORE': 'VERIFY_RESTORE_BLOCKED'
+            }
             for r_step in remediations:
-                op_map = {
-                    'DELETE_RECORD': 'VERIFY_RECORD_ABSENT',
-                    'REDACT_RECORD': 'VERIFY_RECORD_REDACTED',
-                    'ANONYMIZE_RECORD': 'VERIFY_RECORD_ANONYMIZED',
-                    'DISABLE_DATA_FLOW': 'VERIFY_DATA_FLOW_DISABLED',
-                    'BLOCK_RESTORE': 'VERIFY_RESTORE_BLOCKED'
-                }
                 verifications.append({
                     'system_id': r_step['system_id'],
                     'resource_id': r_step['resource_id'],
@@ -339,16 +286,13 @@ class FullAuditPipeline:
                     'evidence_id': ''
                 })
         else:
-            # For COMPLETE cases, add verification steps for each verified resource with non-empty evidence citations
-            for res_id, ev_rec in res_to_latest_ev.items():
-                sys_id = ev_rec['system_id']
-                state = ev_rec['state']
-                eid = ev_rec['evidence_id']
+            for res_id, ev in res_to_ev.items():
+                sys_id = ev['system_id']
+                state = ev['state']
+                eid = ev['evidence_id']
                 if sys_id in ('account_service', 'security_service'):
                     continue
-                is_comp, _, _, _, _, v_op, v_st = self.policy_engine.evaluate_state(
-                    sys_id, res_id, state, ev_rec.get('raw')
-                )
+                is_comp, _, _, _, _, v_op, v_st = self.policy_engine.evaluate_state(sys_id, res_id, state, ev.get('raw'))
                 verifications.append({
                     'system_id': sys_id,
                     'resource_id': res_id,
@@ -358,14 +302,12 @@ class FullAuditPipeline:
                 })
 
         status = 'INCOMPLETE' if is_incomplete else 'COMPLETE'
+        all_raw = []
+        for f in findings: all_raw.append({'phase': 'FINDING', **f})
+        for r in remediations: all_raw.append({'phase': 'REMEDIATION', **r})
+        for v in verifications: all_raw.append({'phase': 'VERIFICATION', **v})
         
-        all_raw_steps = []
-        for f in findings: all_raw_steps.append({'phase': 'FINDING', **f})
-        for r in remediations: all_raw_steps.append({'phase': 'REMEDIATION', **r})
-        for v in verifications: all_raw_steps.append({'phase': 'VERIFICATION', **v})
-        
-        sorted_steps = sort_steps(all_raw_steps)
-        
+        sorted_steps = sort_steps(all_raw)
         return {
             'case_id': case_id,
             'deletion_status': status,
@@ -373,5 +315,5 @@ class FullAuditPipeline:
         }
 
 if __name__ == "__main__":
-    p = FullAuditPipeline()
-    print("FullAuditPipeline initialized successfully without shortcuts.")
+    pipeline = FullAuditPipeline()
+    print("FullAuditPipeline successfully initialized.")

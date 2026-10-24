@@ -35,6 +35,17 @@ class PolicyEngine:
         res_lower = str(resource_id).lower()
         sys_lower = str(system_id).lower()
 
+        is_mkt = False
+        is_att = False
+        if isinstance(raw_record, dict):
+            is_mkt = raw_record.get('is_marketing') or ('marketing' in str(raw_record).lower()) or ('opt_in' in str(raw_record).lower())
+            is_att = raw_record.get('is_attachment') or ('attachment' in str(raw_record).lower()) or ('delivery' in str(raw_record).lower()) or ('pdf' in str(raw_record).lower())
+        elif raw_record:
+            is_mkt = ('marketing' in str(raw_record).lower()) or ('opt_in' in str(raw_record).lower())
+            is_att = ('attachment' in str(raw_record).lower()) or ('delivery' in str(raw_record).lower()) or ('pdf' in str(raw_record).lower())
+
+        if is_mkt:
+            return 'MARKETING_PROFILE', 'rule_10', 'DELETE'
         if 'tombstone' in res_lower:
             return 'ACCOUNT_TOMBSTONE', 'rule_15', 'REDACT'
         if sys_lower == 'account_service' or 'account' in res_lower:
@@ -43,15 +54,18 @@ class PolicyEngine:
             return 'SEARCH_INDEX_ENTRY', 'rule_03', 'DELETE'
         if sys_lower == 'export_service' or 'export' in res_lower:
             return 'USER_EXPORT', 'rule_09', 'DELETE'
+        if sys_lower == 'marketing_platform' or 'marketing' in res_lower:
+            return 'MARKETING_PROFILE', 'rule_10', 'DELETE'
         if sys_lower == 'analytics_platform' or 'analytics' in res_lower:
             return 'ANALYTICS_PROFILE', 'rule_07', 'ANONYMIZE'
         if sys_lower == 'support_platform' or 'support' in res_lower:
-            # If attachment vs conversation
-            if raw_record and ('attachment' in str(raw_record).lower() or 'document' in str(raw_record).lower()):
+            if is_att:
                 return 'SUPPORT_ATTACHMENT', 'rule_06', 'DELETE'
             return 'SUPPORT_MESSAGE', 'rule_05', 'REDACT'
         if sys_lower == 'security_service' or 'audit' in res_lower:
             return 'SECURITY_AUDIT_LOG', 'rule_12', 'RETAIN'
+        if sys_lower == 'legal_service' or 'legal' in res_lower:
+            return 'LEGAL_HOLD_RECORD', 'rule_13', 'RETAIN'
         if sys_lower == 'backup_service' or 'backup' in res_lower:
             return 'BACKUP_ARCHIVE', 'rule_14', 'RETAIN'
         if sys_lower == 'integration_service' or 'data_flow' in res_lower:
@@ -73,28 +87,7 @@ class PolicyEngine:
         """
         category, rule_id, action = self.classify_resource(system_id, resource_id, raw_record)
         
-        if category == 'USER_PROFILE' or action == 'DELETE':
-            if current_state == 'PRESENT':
-                return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
-                        'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
-            else:
-                return (True, None, None, None, None, 'VERIFY_RECORD_ABSENT', 'ABSENT')
-
-        elif category == 'SEARCH_INDEX_ENTRY':
-            if current_state == 'PRESENT':
-                return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
-                        'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
-            else:
-                return (True, None, None, None, None, 'VERIFY_RECORD_ABSENT', 'ABSENT')
-
-        elif category == 'USER_EXPORT':
-            if current_state == 'PRESENT':
-                return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
-                        'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
-            else:
-                return (True, None, None, None, None, 'VERIFY_RECORD_ABSENT', 'ABSENT')
-
-        elif category == 'SUPPORT_ATTACHMENT':
+        if category in ('USER_PROFILE', 'MARKETING_PROFILE', 'SEARCH_INDEX_ENTRY', 'USER_EXPORT', 'SUPPORT_ATTACHMENT') or action == 'DELETE':
             if current_state == 'PRESENT':
                 return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
                         'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
@@ -102,7 +95,10 @@ class PolicyEngine:
                 return (True, None, None, None, None, 'VERIFY_RECORD_ABSENT', 'ABSENT')
 
         elif category == 'SUPPORT_MESSAGE':
-            if current_state in ('PRESENT', 'EXPOSED', 'UNREDACTED'):
+            if current_state == 'PRESENT':
+                return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
+                        'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
+            elif current_state in ('EXPOSED', 'UNREDACTED'):
                 return (False, 'REPORT_EXPOSED_PII', 'PRESENT',
                         'REDACT_RECORD', 'REDACTED', 'VERIFY_RECORD_REDACTED', 'REDACTED')
             else:
@@ -116,7 +112,10 @@ class PolicyEngine:
                 return (True, None, None, None, None, 'VERIFY_RECORD_REDACTED', 'REDACTED')
 
         elif category in ('ANALYTICS_PROFILE', 'PRODUCT_TELEMETRY'):
-            if current_state in ('PRESENT', 'EXPOSED', 'UNANONYMIZED'):
+            if current_state == 'PRESENT':
+                return (False, 'REPORT_REMAINING_RECORD', 'PRESENT',
+                        'DELETE_RECORD', 'ABSENT', 'VERIFY_RECORD_ABSENT', 'ABSENT')
+            elif current_state in ('EXPOSED', 'UNANONYMIZED'):
                 return (False, 'REPORT_EXPOSED_PII', 'PRESENT',
                         'ANONYMIZE_RECORD', 'ANONYMIZED', 'VERIFY_RECORD_ANONYMIZED', 'ANONYMIZED')
             else:
